@@ -18,6 +18,9 @@ getkey() {
     c1=$(dd bs=1 count=1 2>/dev/null)
 
     case "$c1" in
+        '')
+            return ;;
+
         "$ESC")
             stty raw -echo min 0 time 01
             c2=$(dd bs=1 count=1 2>/dev/null)

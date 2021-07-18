@@ -7,6 +7,7 @@ include getkey
 
 ESC=$(printf '\033')
 
+SELF_PID=$$
 TMP=/tmp/selmenu-$$
 
 running=
@@ -157,8 +158,8 @@ print_items() {
 }
 
 print_ui() {
-    status_prepare
-    preview_prepare
+    prepare_cmd status "$status_cmd"
+    prepare_cmd preview "$preview_cmd"
 
     if [ -n "$query" ]; then
         text="$prompt$query█"
@@ -175,7 +176,7 @@ print_ui() {
            "$items_len"         \
            "$(status_load)"
 
-    if [ "$cols" -ge 60 ]; then
+    if [ -n "$preview_cmd" ] && [ "$cols" -ge 60 ]; then
         mid_line_col=$((cols_mid - 3))
         for i in $(seq 2 "$((max_items + 1))"); do
             printf '\033[%d;%df │ \033[K' "$i" "$mid_line_col"
@@ -194,42 +195,54 @@ print_ui() {
     fi
 }
 
-# TODO: find a way to update screen skipping dd blocking
+kill_dd() {
+    self_pid="$1"
+    session_pid=$(ps -o sid= -p "$self_pid")
+    [ -n "$session_pid" ] || return
+    pid=$(ps -g "$session_pid" -o cmd,pid |
+              sed -rn 's/^dd.+ ([0-9]+)/\1/p')
+    [ -n "$pid" ] || return
+    kill "$pid"
+}
 
-status_prepare() {
-    [ -n "$status_cmd" ] || return
-    cache="$TMP/$selected_text-status"
-    if [ ! -f "$cache" ]; then
-        eval "$status_cmd" > "$cache" &
-    fi
+cmd_cache_path() {
+    sum=$(echo "$1" | cksum | cut -d ' ' -f1)
+    echo "$TMP/$sum"
+}
+
+prepare_cmd() {
+    name="$1"
+    cmd="$2"
+    [ -n "$cmd" ] || return
+    [ -n "$selected_text" ] || return
+    {
+        mkdir -p "$TMP"
+        cache=$(cmd_cache_path "$selected_text-$name")
+        res=$(eval "$cmd")
+        do_kill=
+        if [ ! -f "$cache" ]; then
+            do_kill=1
+        fi
+        [ -n "$res" ] && echo "$res" > "$cache"
+        [ -n "$do_kill" ] && kill_dd "$SELF_PID"
+    } &
+    # TODO: the above is too slow
 }
 
 status_load() {
     [ -n "$status_cmd" ] || return
-    cache="$TMP/$selected_text-status"
+    cache=$(cmd_cache_path "$selected_text-status")
     if [ -f "$cache" ]; then
         head -n1 "$cache"
-    else
-        echo loading...
-    fi
-}
-
-preview_prepare() {
-    [ -n "$preview_cmd" ] || return
-    cache="$TMP/$selected_text-preview"
-    if [ ! -f "$cache" ]; then
-        eval "$preview_cmd" > "$cache" &
     fi
 }
 
 preview_load() {
     [ -n "$preview_cmd" ] || return
-    cache="$TMP/$selected_text-preview"
+    cache=$(cmd_cache_path "$selected_text-preview")
     if [ -f "$cache" ]; then
         n=$((preview_start + 1))
         tail -n +"$n" "$cache" | head -n "$max_items"
-    else
-        echo loading...
     fi
 }
 
@@ -253,7 +266,8 @@ set_lines() {
 
 onresize() {
     set_lines
-    # TODO: pass the blocking dd in getkey
+    kill_dd $SELF_PID
+    # TODO: the above won't do much as dd is blocking
 }
 
 print_result() {
@@ -375,6 +389,8 @@ update_query() {
 
 bind() {
     val bindings set "$1" "$2"
+    # TODO: this is too slow
+    # maybe do a simple string concat and grep on keypress?
 }
 
 bind_defaults() {
@@ -385,6 +401,7 @@ bind_defaults() {
     bind up     'up'
     bind down   'down'
     bind enter  'accept'
+    bind right  'accept'
 }
 
 handle_keybinding() {
@@ -433,8 +450,8 @@ parse_args() {
     selected_text_opt=
     title=''
     prompt='> '
-    status_cmd=:
-    preview_cmd=:
+    status_cmd=
+    preview_cmd=
     allow_multi=
     preselector=
     no_reset=
@@ -462,8 +479,6 @@ parse_args() {
 }
 
 main() {
-    mkdir -p "$TMP"
-
     running=1
     arr items =
     arr items_clean =
