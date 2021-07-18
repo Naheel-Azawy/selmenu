@@ -1,0 +1,150 @@
+#!/bin/sh
+
+# get the pressed key as a human readable string
+# k=$(getkey)
+
+# related links:
+# https://unix.stackexchange.com/questions/464930/can-i-read-a-single-character-from-stdin-in-posix-shell
+# https://stackoverflow.com/a/46481173/3825872
+
+ESC=$(printf '\033')
+
+getkey() {
+    getch_stty_bak=$(stty -g)
+    stty -icanon -echo
+    c2= ; c3= ; c4= ; c5=
+
+    trap 'echo ctrl-c; trap - INT; return 0' INT
+    c1=$(dd bs=1 count=1 2>/dev/null)
+
+    case "$c1" in
+        "$ESC")
+            stty raw -echo min 0 time 01
+            c2=$(dd bs=1 count=1 2>/dev/null)
+
+            case "$c2" in
+                [|O)
+                    c3=$(dd bs=1 count=1 2>/dev/null)
+
+                    case "$c3" in
+                        1|2|3|4|5|6|7|8|9)
+                            c4=$(dd bs=1 count=1 2>/dev/null)
+
+                            case "$c4" in
+                                ';')
+                                    c5=$(dd bs=1 count=2 2>/dev/null) ;;
+                                0|1|2|3|4|5|6|7|8|9)
+                                    c5=$(dd bs=1 count=1 2>/dev/null) ;;
+                            esac
+                    esac ;;
+            esac ;;
+    esac
+
+    key="$c1$c2$c3$c4$c5"
+
+    trap - INT
+    stty "$getch_stty_bak"
+
+    case "$key" in
+        "$ESC")             key=esc    ;;
+
+        "${ESC}[A")         key=up     ;;
+        "${ESC}[B")         key=down   ;;
+        "${ESC}[D")         key=left   ;;
+        "${ESC}[C")         key=right  ;;
+
+        "${ESC}[1;2A")      key=shift-up     ;;
+        "${ESC}[1;2B")      key=shift-down   ;;
+        "${ESC}[1;2D")      key=shift-left   ;;
+        "${ESC}[1;2C")      key=shift-right  ;;
+
+        "${ESC}[1;3A")      key=alt-up     ;;
+        "${ESC}[1;3B")      key=alt-down   ;;
+        "${ESC}[1;3D")      key=alt-left   ;;
+        "${ESC}[1;3C")      key=alt-right  ;;
+
+        "${ESC}[1;4A")      key=alt-shift-up     ;;
+        "${ESC}[1;4B")      key=alt-shift-down   ;;
+        "${ESC}[1;4D")      key=alt-shift-left   ;;
+        "${ESC}[1;4C")      key=alt-shift-right  ;;
+
+        "${ESC}[1;5A")      key=ctrl-up     ;;
+        "${ESC}[1;5B")      key=ctrl-down   ;;
+        "${ESC}[1;5D")      key=ctrl-left   ;;
+        "${ESC}[1;5C")      key=ctrl-right  ;;
+
+        "${ESC}[5~")        key=pgup   ;;
+        "${ESC}[6~")        key=pgdown ;;
+        "${ESC}[2~")        key=insert ;;
+        "${ESC}[1~")        key=home   ;;
+        "${ESC}[8~")        key=end    ;;
+        "${ESC}[3~")        key=del    ;;
+
+        "${ESC}OP")         key=f1     ;;
+        "${ESC}OQ")         key=f2     ;;
+        "${ESC}OR")         key=f3     ;;
+        "${ESC}OS")         key=f4     ;;
+        "${ESC}[15~")       key=f5     ;;
+        "${ESC}[17~")       key=f6     ;;
+        "${ESC}[18~")       key=f7     ;;
+        "${ESC}[19~")       key=f8     ;;
+        "${ESC}[20~")       key=f9     ;;
+        "${ESC}[21~")       key=f10    ;;
+        "${ESC}[23~")       key=f11    ;;
+        "${ESC}[24~")       key=f12    ;;
+
+        "$(printf '\n')")   key=enter  ;;
+        "$(printf '\t')")   key=tab    ;;
+        "$(printf ' ')")    key=space  ;;
+        "$(printf '\177')") key=bspace ;;
+
+        "$(printf '\0')")   key=ctrl-space  ;; # TODO: =enter?
+        "$(printf '\1')")   key=ctrl-a      ;;
+        "$(printf '\2')")   key=ctrl-b      ;;
+        "$(printf '\4')")   key=ctrl-d      ;;
+        "$(printf '\5')")   key=ctrl-e      ;;
+        "$(printf '\6')")   key=ctrl-f      ;;
+        "$(printf '\7')")   key=ctrl-g      ;;
+        "$(printf '\10')")  key=ctrl-h      ;;
+        "$(printf '\11')")  key=ctrl-i      ;;
+        "$(printf '\12')")  key=ctrl-j      ;; # TODO: =enter?
+        "$(printf '\13')")  key=ctrl-k      ;;
+        "$(printf '\14')")  key=ctrl-l      ;;
+        "$(printf '\15')")  key=ctrl-m      ;; # TODO: =enter?
+        "$(printf '\16')")  key=ctrl-n      ;;
+        "$(printf '\17')")  key=ctrl-o      ;;
+        "$(printf '\20')")  key=ctrl-p      ;;
+        "$(printf '\21')")  key=ctrl-q      ;;
+        "$(printf '\22')")  key=ctrl-r      ;;
+        "$(printf '\23')")  key=ctrl-s      ;;
+        "$(printf '\24')")  key=ctrl-t      ;;
+        "$(printf '\25')")  key=ctrl-u      ;;
+        "$(printf '\26')")  key=ctrl-v      ;;
+        "$(printf '\27')")  key=ctrl-w      ;;
+        "$(printf '\30')")  key=ctrl-x      ;;
+        "$(printf '\31')")  key=ctrl-y      ;;
+        "$(printf '\32')")  key=ctrl-z      ;; # TODO: no way to handle SIGSTP?
+
+        "$ESC"*)            key="alt-$c2" ;;
+    esac
+
+    echo "$key"
+}
+
+main() {
+    case "$1" in
+        '--test')
+        echo 'press ctrl-d to end'
+        trap : INT
+        k=
+        while [ "$k" != ctrl-d ]; do
+            k=$(getkey)
+            echo "$k"
+        done ;;
+
+        '--read')
+            getkey ;;
+    esac
+}
+
+main "$@"

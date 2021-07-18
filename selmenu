@@ -1,0 +1,515 @@
+#!/bin/sh
+
+. "$(which includer)"
+
+include valsh
+include getkey
+
+ESC=$(printf '\033')
+
+TMP=/tmp/selmenu-$$
+
+running=
+big_str=
+lines=
+cols=
+cols_mid=
+max_items=
+selected=0
+selected_text=
+result=
+query=
+
+selected_opt=
+selected_text_opt=
+title=
+prompt=
+status_cmd=
+preview_cmd=
+allow_multi=
+preselector=
+no_reset=
+reset=
+preview_start=0
+
+remove_ansi() {
+    sed 's/\x1b\[[0-9;]*m//g'
+}
+
+remove_ansi_reset() {
+    start_bytes=$(echo "$1" | head -n1 | head -c 4)
+    if [ "$start_bytes" = "${ESC}[0m" ]; then
+        echo "$1" | head -n1 | tail -c +5
+    else
+        echo "$1"
+    fi
+}
+
+read_input() {
+    items_len=0
+    big_str=
+    while read -r line; do
+        [ "$items_len" = 0 ] && {
+            # things like `ls` add a reset sequence in the beginning
+            # this is bad for us as we reverse the colors for the selection
+            line=$(remove_ansi_reset "$line")
+        }
+        eval items_$items_len="\"$line\""
+        items_len=$((items_len + 1))
+        big_str="$big_str$line
+"
+    done
+}
+
+# thanks to https://github.com/dylanaraps/fff
+
+setup_terminal() {
+    # Setup the terminal for the TUI.
+    # '\e[?1049h': Use alternative screen buffer.
+    # '\e[?7l':    Disable line wrapping.
+    # '\e[?25l':   Hide the cursor.
+    # '\e[2J':     Clear the screen.
+    # '\e[1;Nr':   Limit scrolling to scrolling area.
+    #              Also sets cursor to (0,0).
+    printf '\033[?1049h\033[?7l\033[?25l\033[2J'
+
+    # Hide echoing of user input
+    stty -echo
+}
+
+reset_terminal() {
+    # Reset the terminal to a useable state (undo all changes).
+    # '\e[?7h':   Re-enable line wrapping.
+    # '\e[?25h':  Unhide the cursor.
+    # '\e[2J':    Clear the terminal.
+    # '\e[;r':    Set the scroll region to its default value.
+    #             Also sets cursor to (0,0).
+    # '\e[?1049l: Restore main screen buffer.
+    printf '\033[?7h\033[?25h\033[2J\033[;r\033[?1049l'
+
+    # Show user input.
+    stty echo
+}
+
+clear_screen() {
+    # Only clear the scrolling window (dir item list).
+    # '\e[%sH':    Move cursor to bottom of scroll area.
+    # '\e[9999C':  Move cursor to right edge of the terminal.
+    # '\e[1J':     Clear screen to top left corner (from cursor up).
+    # '\e[2J':     Clear screen fully (if using tmux) (fixes clear issues).
+    # '\e[1;%sr':  Clearing the screen resets the scroll region(?). Re-set it.
+    #              Also sets cursor to (0,0).
+    printf '\033[%sH\033[9999C\033[1J%b\033[1;%sr' \
+           "$lines" "${TMUX:+\033[2J}" "$lines"
+}
+
+load_item() {
+    eval "printf '%s' \"\$items_$1\""
+}
+
+load_item_clean() {
+    index="$1"
+    val=$(eval "echo \"\$items_clean_$index\"")
+    if [ -z "$val" ]; then
+        val=$(load_item "$index" | remove_ansi)
+        eval "items_clean_$index=\"\$val\""
+    fi
+    echo "$val"
+}
+
+print_items_range() {
+    from="$1"
+    to="$2"
+    to="$((to - 1))"
+    for i in $(seq "$from" "$to"); do
+        # marked=$(val marked_items get "$i")
+        marked=$(eval "echo \$marked_items_$i")
+        if [ -n "$marked" ]; then
+            printf '❱ '
+        else
+            printf '  '
+        fi
+        [ "$i" = "$selected" ] && printf '\033[7m'
+        load_item "$i"
+        # shellcheck disable=SC2059
+        printf '\033[0m'
+        [ "$i" != "$to" ] && printf '\n'
+    done
+}
+
+print_items() {
+    if [ "$max_items" -ge "$items_len" ]; then
+        from=0
+        to="$max_items"
+    else
+        mid=$((max_items / 2))
+        from=$((selected - mid))
+        if [ $from -lt 0 ]; then
+            from=0
+        fi
+        to=$((from + max_items))
+        if [ "$to" -ge "$items_len" ]; then
+            to="$items_len"
+            from=$((to - max_items))
+        fi
+    fi
+    print_items_range "$from" "$to"
+}
+
+print_ui() {
+    status_prepare
+    preview_prepare
+
+    if [ -n "$query" ]; then
+        text="$prompt$query█"
+    elif [ -n "$title" ]; then
+        text="$title"
+    else
+        text="$prompt█"
+    fi
+
+    printf '%s\n' "$text"
+    print_items
+    printf '\n%d/%d %s'         \
+           "$((selected + 1))"  \
+           "$items_len"         \
+           "$(status_load)"
+
+    if [ "$cols" -ge 60 ]; then
+        mid_line_col=$((cols_mid - 3))
+        for i in $(seq 2 "$((max_items + 1))"); do
+            printf '\033[%d;%df │ \033[K' "$i" "$mid_line_col"
+        done
+
+        pv_content=$(preview_load)
+
+        count=2
+        IFS='
+'
+        for line in $pv_content; do
+            printf '\033[%d;%df%s' "$count" "$cols_mid" "$line"
+            count=$((count + 1))
+        done
+
+    fi
+}
+
+# TODO: find a way to update screen skipping dd blocking
+
+status_prepare() {
+    [ -n "$status_cmd" ] || return
+    cache="$TMP/$selected_text-status"
+    if [ ! -f "$cache" ]; then
+        eval "$status_cmd" > "$cache" &
+    fi
+}
+
+status_load() {
+    [ -n "$status_cmd" ] || return
+    cache="$TMP/$selected_text-status"
+    if [ -f "$cache" ]; then
+        head -n1 "$cache"
+    else
+        echo loading...
+    fi
+}
+
+preview_prepare() {
+    [ -n "$preview_cmd" ] || return
+    cache="$TMP/$selected_text-preview"
+    if [ ! -f "$cache" ]; then
+        eval "$preview_cmd" > "$cache" &
+    fi
+}
+
+preview_load() {
+    [ -n "$preview_cmd" ] || return
+    cache="$TMP/$selected_text-preview"
+    if [ -f "$cache" ]; then
+        n=$((preview_start + 1))
+        tail -n +"$n" "$cache" | head -n "$max_items"
+    else
+        echo loading...
+    fi
+}
+
+preview_up() {
+    preview_start=$((preview_start - 1))
+    if [ $preview_start -lt 0 ]; then
+        preview_start=0
+    fi
+}
+
+preview_down() {
+    preview_start=$((preview_start + 1))
+}
+
+set_lines() {
+    lines=$(tput lines)
+    cols=$(tput cols)
+    cols_mid=$((cols / 2))
+    max_items=$((lines - 2))
+}
+
+onresize() {
+    set_lines
+    # TODO: pass the blocking dd in getkey
+}
+
+print_result() {
+    [ -n "$result" ] && {
+        result=$(echo "$result" | remove_ansi)
+        printf '%s\n' "$result"
+    }
+}
+
+abort() {
+    save_preselector
+    rm -rf "$TMP"
+    running=
+}
+
+load_result() {
+    result=$(load_item "$selected")
+    if [ -n "$result" ]; then
+        echo "$result"
+    elif [ -n "$query" ]; then
+        echo "$query"
+    fi
+}
+
+accept() {
+    if [ $# != 0 ]; then
+        result="$*"
+    else
+        result=$(load_result)
+    fi
+    abort
+}
+
+accept_prefix() {
+    result=$(load_result)
+    result="$1 $result"
+    abort
+}
+
+set_selection_text() {
+    set_selection "$(arr items indexof "$1")"
+}
+
+set_selection() {
+    selected="$1"
+    [ -n "$selected" ] || selected=0
+    selected_text=$(load_item_clean "$selected")
+    export selected_text
+}
+
+move_selection() {
+    change="$1"
+    set_selection $((selected + change))
+    if [ "$selected" -lt 0 ]; then
+        set_selection 0
+    elif [ "$selected" -ge "$items_len" ]; then
+        set_selection $((items_len - 1))
+    fi
+}
+
+pgup()   { move_selection -$max_items; }
+pgdown() { move_selection +$max_items; }
+up()     { move_selection -1; }
+down()   { move_selection +1; }
+first()  { move_selection  0; }
+last()   { move_selection $((items_len - 1)); }
+
+toggle() {
+    [ -n "$allow_multi" ] || return
+    val=$(val marked_items get "$selected")
+    if [ -n "$val" ]; then
+        val marked_items unset "$selected"
+    else
+        val marked_items set "$selected" 1
+    fi
+    # TODO: something weird happening here
+}
+
+select_all() {
+    [ -n "$allow_multi" ] || return
+    for i in $(seq 0 $((items_len - 1))); do
+        eval "marked_items_$i=1"
+    done
+    marked_items_len="$items_len"
+}
+
+clear_selection() {
+    [ -n "$allow_multi" ] || return
+    val marked_items clear
+}
+
+save_preselector() {
+    if [ -f "$preselector" ]; then
+        load_item "$selected" > "$preselector"
+        echo >> "$preselector"
+
+        len=$(val marked_items len)
+        for i in $(seq 0 $((len - 1))); do
+            val=$(val marked_items get "$i")
+            if [ -n "$val" ]; then
+                load_item "$i" >> "$preselector"
+                echo >> "$preselector"
+            fi
+        done
+    fi
+}
+
+update_query() {
+    arr items clear
+    filtered=$(echo "$big_str" | grep -i "$query")
+    IFS='
+'
+    for line in $filtered; do
+        eval items_$items_len="\"$line\""
+        items_len=$((items_len + 1))
+    done
+    set_selection 0
+}
+
+bind() {
+    val bindings set "$1" "$2"
+}
+
+bind_defaults() {
+    bind ctrl-q 'abort'
+    bind esc    'abort'
+    bind pgup   'pgup'
+    bind pgdown 'pgdown'
+    bind up     'up'
+    bind down   'down'
+    bind enter  'accept'
+}
+
+handle_keybinding() {
+    key="$1"
+    fn=$(val bindings get "$key")
+    if [ -n "$fn" ]; then
+        eval "$fn"
+    fi
+}
+
+handle_key() {
+    key="$1"
+    if [ "${#key}" = 1 ]; then
+        query="$query$key"
+        update_query
+    elif [ -n "$query" ]; then
+        case "$key" in
+            space)
+                query="$query "
+                update_query ;;
+            bspace)
+                query=$(echo "$query" | sed 's/.$//')
+                update_query ;;
+            esc)
+                query=""
+                update_query ;;
+            *)
+                handle_keybinding "$key" ;;
+        esac
+    else
+        handle_keybinding "$key"
+    fi
+}
+
+main_loop() {
+    while [ -n "$running" ]; do
+        key=$(getkey)
+        handle_key "$key"
+        clear_screen
+        print_ui
+    done
+}
+
+parse_args() {
+    selected_opt=
+    selected_text_opt=
+    title=''
+    prompt='> '
+    status_cmd=:
+    preview_cmd=:
+    allow_multi=
+    preselector=
+    no_reset=
+    reset=
+    evals=
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --selected)      selected_opt="$2";          shift 2 ;;
+            --selected-text) selected_text_opt="$2";     shift 2 ;;
+            --query)         query="$2";                 shift 2 ;;
+            --header)        title="$2";                 shift 2 ;;
+            --prompt)        prompt="$2";                shift 2 ;;
+            --status-cmd)    status_cmd="$2";            shift 2 ;;
+            --preview-cmd)   preview_cmd="$2";           shift 2 ;;
+            --multi)         allow_multi=1;              shift 1 ;;
+            --preselector)   preselector="$2";           shift 2 ;;
+            --no-reset)      no_reset=1;                 shift 1 ;;
+            --reset)         reset=1;                    shift 1 ;;
+            --eval)          evals="$2";                 shift 2 ;;
+            --help)          echo later;                return 1 ;;
+            *)               err "unknown option '$1'"; return 1 ;;
+        esac
+    done
+}
+
+main() {
+    mkdir -p "$TMP"
+
+    running=1
+    arr items =
+    arr items_clean =
+    arr marked_items =
+    obj_light bindings =
+    bind_defaults
+
+    parse_args "$@" || return
+
+    if [ -n "$reset" ]; then
+        reset_terminal >/dev/tty
+        return
+    fi
+
+    read_input
+
+    if [ -n "$selected_text_opt" ]; then
+        set_selection_text "$selected_text_opt"
+    else
+        [ -n "$selected_opt" ] || selected_opt=0
+        set_selection "$selected_opt"
+    fi
+
+    if [ -f "$preselector" ]; then
+        text=$(head -n1 "$preselector")
+        set_selection_text "$text"
+    elif [ -n "$preselector" ]; then
+        load_item 0 > "$preselector"
+    fi
+
+    if [ -n "$evals" ]; then
+        eval "$evals"
+    fi
+
+    set_lines
+    trap onresize WINCH
+    trap : INT # to handle ctrl-c in getkey
+    {
+        setup_terminal
+        clear_screen
+        print_ui
+        main_loop
+        [ -z "$no_reset" ] && reset_terminal
+    } </dev/tty >/dev/tty
+    trap - INT
+    print_result
+}
+
+main "$@"

@@ -1,0 +1,14 @@
+* selmenu
+  A selection menu written in POSIX shell. Still experimental and super slow.
+
+** Installation
+   Make sure [[https://github.com/Naheel-Azawy/valsh][valsh]] is installed first and then
+   #+begin_src shell-script
+     make install
+   #+end_src
+
+** TODO
+   Document...
+
+** License
+   GPL3
